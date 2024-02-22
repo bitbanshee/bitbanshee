@@ -1,0 +1,60 @@
+#!/bin/zsh
+
+initial_number=0
+final_number=9999
+number_of_digits=4
+output_file="pass_dict.txt"
+
+function help() {
+    echo "gen_num_pass_dict -i [path_to_file] -d [path_to_file] -v [flags]"
+    echo "Flags:"
+    echo "  -h      Display this help message."
+    echo "  -f      Final number. Default: 9999."
+    echo "  -i      Initial number. Default: 0."
+    echo "  -n      Number of digits. Default: 4."
+    echo "  -o      Path to the output dictionary file. Default: 'pass_dict.txt'."
+}
+
+function handle_flags() {
+    while getopts ":hf:i:n:o:" flag
+    do
+        case $flag in
+            h)
+            help
+            exit
+            ;;
+            f) # Final number.
+            final_number=$OPTARG
+            ;;
+            i) # Initial number
+            initial_number=$OPTARG
+            ;;
+            n) # Number of digits
+            number_of_digits=$OPTARG
+            ;;
+            o) # Path to the output dictionary file
+            output_file=$OPTARG
+            ;;
+            \?)
+            echo "invalid flag -$OPTARG"
+            echo ""
+            help
+            exit 1
+            ;;
+        esac
+    done
+}
+
+handle_flags "$@"
+
+function add_zero_left () echo "0${1}"
+
+for ((i = $initial_number; i <= $final_number; i++))
+do
+    p=$i
+    while [[ "${#p}" -lt $number_of_digits ]]
+    do
+        p=$(add_zero_left "$p")
+    done
+    echo "$p" >> "$output_file"
+done

@@ -1,0 +1,237 @@
+#!/bin/zsh
+
+zmodload zsh/system
+jobs=()
+trap 'kill ${jobs[@]} &>/dev/null; exit' INT TERM
+# disabling sigpipe
+trap '' PIPE
+
+verbose=0
+output_pdf="truth.pdf"
+num_workers=1
+
+function help() {
+    echo "breakpdf -i [path_to_file] -d [path_to_file] -v [flags]"
+    echo "Flags:"
+    echo "  -h      Display this help message."
+    echo "  -v      Enable verbose mode. For more verbosity, repeat this flag."
+    echo "  -d      Path to the password dictionary file."
+    echo "  -i      Path to the input PDF file, the locked one."
+    echo "  -o      Path to the output PDF file, the result file. Default: 'truth.pdf'."
+    echo "  -w      Number of concurrent workers trying to break the password. Default 1."
+}
+
+function handle_flags() {
+    while getopts ":hvd:i:o:w:" flag
+    do
+        case $flag in
+            h)
+            help
+            exit
+            ;;
+            v) # Verbose mode
+            verbose=$(( $verbose + 1 ))
+            ;;
+            d) # Path to the password dictionary file
+            pass_dic=$OPTARG
+            ;;
+            i) # Path to the input PDF file, the locked one
+            input_pdf=$OPTARG
+            ;;
+            o) # Path to the output PDF file, the result file
+            output_pdf=$OPTARG
+            ;;
+            w) # Number of concurrent workers trying to break the password
+            num_workers=$OPTARG
+            ;;
+            \?)
+            echo "invalid flag -$OPTARG"
+            echo ""
+            help
+            exit 1
+            ;;
+        esac
+    done
+}
+
+handle_flags "$@"
+
+if [ $verbose -gt 0 ]
+then
+    exec 3>&1 4>&2
+else
+    exec 3>&/dev/null 4>&/dev/null
+fi
+
+if [ $verbose -gt 1 ]
+then
+    exec 5>&3 6>&4
+else
+    exec 5>&/dev/null 6>&/dev/null
+fi
+
+if [ -z "$input_pdf" ]; then
+    echo "input PDF file not specified" >&2
+    exit 1
+fi
+
+if [ -z "$pass_dic" ]; then
+    echo "password dictionary file not specified" >&2
+    exit 1
+fi
+
+function log_context() {
+    context="$1"
+    shift
+    message="$@"
+    echo "$context: $message"
+}
+
+alive_workers_counter_lock_file=$(mktemp "/tmp/alive_workers_counter_lock_file.XXXXXX")
+nothing_read_limit=5
+resp_file=$(mktemp "/tmp/found.XXXXXX")
+id=$(uuidgen)
+conduit_pipe="/tmp/conduit.${id}"
+mkfifo "$conduit_pipe"
+pipe_lock_file=$(mktemp "/tmp/pipe_lock_file.XXXXXX")
+function read_try_pass() {
+    worker="$1"
+    context="worker $worker"
+    nothing_read_counter=$nothing_read_limit
+    zsystem flock -f alive_workers_counter_lock "$alive_workers_counter_lock_file"
+    alive_workers_counter=$(head -n 1 "$alive_workers_counter_lock_file")
+    if [ "${#alive_workers_counter}" -gt 0 ]
+    then
+        echo $(( $alive_workers_counter + 1 )) > "$alive_workers_counter_lock_file"
+    else
+        echo "1" > "$alive_workers_counter_lock_file"
+    fi
+    log_context "$context" "number of workers: $(( $alive_workers_counter + 1 ))"
+    zsystem flock -u $alive_workers_counter_lock
+    while true
+    do
+        zsystem flock -f pipe_lock "$pipe_lock_file"
+        if [ $? -ne 0 ]
+        then
+            log_context "$context" "failed to acquire lock on pipe file" >&4
+            zsystem flock -f alive_workers_counter_lock "$alive_workers_counter_lock_file"
+            alive_workers_counter=$(head -n 1 "$alive_workers_counter_lock_file")
+            echo "$(( $alive_workers_counter - 1 ))" > "$alive_workers_counter_lock_file"
+            zsystem flock -u $alive_workers_counter_lock
+            zsystem flock -u $pipe_lock
+            exit 1
+        fi
+        <"$conduit_pipe" IFS=' ' read -s pass pass_counter
+        read_status=$?
+        zsystem flock -u $pipe_lock
+        if [ "$read_status" -ne 0 ]
+        then
+            nothing_read_counter=$(( $nothing_read_counter - 1 ))
+            if [ "$nothing_read_counter" -eq 0 ]
+            then
+                log_context "$context" "read nothing from pipe $nothing_read_limit times, exiting" >&4
+                zsystem flock -f alive_workers_counter_lock "$alive_workers_counter_lock_file"
+                alive_workers_counter=$(head -n 1 "$alive_workers_counter_lock_file")
+                echo "$(( $alive_workers_counter - 1 ))" > "$alive_workers_counter_lock_file"
+                zsystem flock -u $alive_workers_counter_lock
+                exit 1
+            fi
+            log_context "$context" "read nothing from pipe" >&5
+            continue
+        elif [[ "$pass" == "${id}_end" ]]
+        then
+            log_context "$context" "finish command received" >&5
+            zsystem flock -f alive_workers_counter_lock "$alive_workers_counter_lock_file"
+            alive_workers_counter=$(head -n 1 "$alive_workers_counter_lock_file")
+            echo "$(( $alive_workers_counter - 1 ))" > "$alive_workers_counter_lock_file"
+            zsystem flock -u $alive_workers_counter_lock
+            exit
+        fi
+        log_context "$context" "read $pass from pipe" >&5
+        if [ $(( $pass_counter % 50 )) -eq 0 ]
+        then
+            log_context "$context" "checkpoint: trying password $pass" >&3
+        fi
+        pdftk "$input_pdf" input_pw "$pass" output "$output_pdf" &>/dev/null
+        if [ $? -eq 0 ]
+        then
+            log_context "$context" "success, password is '$pass'" >>"$resp_file"
+            zsystem flock -f alive_workers_counter_lock "$alive_workers_counter_lock_file"
+            alive_workers_counter=$(head -n 1 "$alive_workers_counter_lock_file")
+            echo "$(( $alive_workers_counter - 1 ))" > "$alive_workers_counter_lock_file"
+            zsystem flock -u $alive_workers_counter_lock
+            exit
+        fi
+    done
+}
+
+context="main"
+log_context "$context" "starting $num_workers workers"
+zsystem flock -f pipe_lock "$pipe_lock_file"
+for (( i=0; i<$num_workers; i++ ))
+do
+    read_try_pass "$i" & jobs+=($!)
+done
+zsystem flock -u $pipe_lock
+
+log_context "$context" "waiting for workers to start"
+zsystem flock -f alive_workers_counter_lock "$alive_workers_counter_lock_file"
+alive_workers_counter=$(head -n 1 "$alive_workers_counter_lock_file")
+zsystem flock -u $alive_workers_counter_lock
+waited=0
+max_wait_for_workers_to_start=15
+while [ $alive_workers_counter -ne $num_workers ] && [ $waited -lt $max_wait_for_workers_to_start ]
+do
+    sleep 1
+    waited=$(( $waited + 1 ))
+    zsystem flock -f alive_workers_counter_lock "$alive_workers_counter_lock_file"
+    alive_workers_counter=$(head -n 1 "$alive_workers_counter_lock_file")
+    zsystem flock -u $alive_workers_counter_lock
+done
+log_context "$context" "$alive_workers_counter workers started successfully"
+
+exec 9<>"$conduit_pipe"
+log_context "$context" "trying to crack PDF's password using the passed password dictionary"
+p_counter=0
+for p in $(<"$pass_dic")
+do
+    echo "$p $p_counter" >"$conduit_pipe"
+    p_counter=$(( $p_counter + 1 ))
+    #     printf '\e[A\e[K'
+    log_context "$context" "passed $p to pipe" >&5
+    found=$(wc -l "$resp_file" | awk '{ print $1 }')
+    if [ "$found" -gt 0 ]
+    then
+        log_context "$context" "password found, exiting" >&5
+        head -n 1 "$resp_file"
+        kill ${jobs[@]} &>/dev/null
+        exit 0
+    fi
+done
+
+log_context "$context" "password dictionary has been fully read and passed to workers, waiting for workers to finish"
+for (( i=0; i<$num_workers; i++ ))
+do
+    echo "${id}_end" >"$conduit_pipe"
+done
+while true
+do
+    alive_workers_counter=$(head -n 1 "$alive_workers_counter_lock_file")
+    log_context "$context" "number of workers remaining: $alive_workers_counter" >&5
+    if [ $alive_workers_counter -le 0 ]
+    then
+        log_context "$context" "all workers exited"
+        found=$(wc -l "$resp_file" | awk '{ print $1 }')
+        if [ "$found" -eq 0 ]
+        then
+            log_context "$context" "password not found"
+            exit 1
+        fi
+        exit
+    fi
+    # Due to the concurrent nature of this program, a worker could not receive a finish command,
+    # therefore we keep sending commands until all workers exit.
+    echo "${id}_end" >"$conduit_pipe"
+    sleep 1
+done
+kill ${jobs[@]} &>/dev/null
