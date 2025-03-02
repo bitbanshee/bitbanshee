@@ -2,7 +2,7 @@ baseURL: https://blog.bibanshee.dev/
 defaultContentLanguage: pt
 defaultContentLanguageInSubdir: true
 title: bitbanshee
-theme: ["PaperMod"]
+theme: ["papermod"]
 languages:
   pt:
     languageName: Português
