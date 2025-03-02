@@ -23,7 +23,7 @@ concurrency:
 defaults:
   run:
     shell: bash
-    working-directory: ./blog
+    working-directory: blog
 
 jobs:
   # Build job
