@@ -49,10 +49,10 @@ jobs:
         id: pages
         uses: actions/configure-pages@v5
       - name: Install Node.js dependencies
-        working-directory: blog
+        working-directory: ./blog
         run: "[[ -f package-lock.json || -f npm-shrinkwrap.json ]] && npm ci || true"
       - name: Build with Hugo
-        working-directory: blog
+        working-directory: ./blog
         env:
           HUGO_CACHEDIR: ${{ runner.temp }}/hugo_cache
           HUGO_ENVIRONMENT: production
@@ -63,10 +63,9 @@ jobs:
             --minify \
             --baseURL "${{ steps.pages.outputs.base_url }}/"
       - name: Upload artifact
-        working-directory: blog
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./public
+          path: ./blog/public
 
   # Deployment job
   deploy:
